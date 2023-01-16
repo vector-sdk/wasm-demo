@@ -1,0 +1,27 @@
+cargo-features = ["per-package-target"]
+
+[workspace]
+members = [
+    "schannel-lib",
+    "wasm-client",
+    "wasm-host",
+    "wasm-rt",
+]
+resolver = "2"
+
+[workspace.package]
+version      = "0.3.0"
+edition      = "2021"
+authors      = ["Markku Kylänpää <markku.kylanpaa@vtt.fi>"]
+repository   = "https://github.com/vector-sdk/wasm-demo"
+readme       = "README.md"
+license      = "MIT"
+description  = "WebAssembly demo for Keystone Enclaves"
+
+[profile.dev]
+opt-level = 1
+debug = false
+
+[profile.release]
+opt-level = 1
+debug = false

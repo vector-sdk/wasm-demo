@@ -1,0 +1,6 @@
+[submodule "rust-sdk"]
+	path = rust-sdk
+	url = https://github.com/vector-sdk/rust-sdk.git
+[submodule "static-dh-ecdh"]
+	path = static-dh-ecdh
+	url = https://github.com/vector-sdk/static-dh-ecdh.git
