@@ -135,7 +135,8 @@ pub fn parse(cli: &Cli, verbose: bool) -> Result<(&String, Vec<u8>)> {
 /// * If there was an error in the public key
 ///
 pub fn receive_reply(mut stream: &TcpStream) -> Result<(PkP384, Vec<u8>)> {
-    const MAX_MESSAGE_SIZE: usize = 512;
+    const MAX_MESSAGE_SIZE: usize = 2048;
+    const MSG_LENGTH_SIZE: usize = 2;
     let mut received: Vec<u8> = vec![];
     let mut attestation: Vec<u8> = vec![];
     let mut rx_bytes = [0u8; MAX_MESSAGE_SIZE];
@@ -158,12 +159,12 @@ pub fn receive_reply(mut stream: &TcpStream) -> Result<(PkP384, Vec<u8>)> {
         }
 
         if pubkey_len == 0 && total_bytes_read > 0 {
-            pubkey_len = rx_bytes[0] as usize;
+	    pubkey_len = (((rx_bytes[1] as u16) << 8) | (rx_bytes[0] as u16)) as usize;
         }
 
-        if total_bytes_read >= pubkey_len + 1 {
-            received.extend_from_slice(&rx_bytes[1..pubkey_len + 1]);
-            attestation.extend_from_slice(&rx_bytes[pubkey_len + 1..bytes_read]);
+        if total_bytes_read >= pubkey_len + MSG_LENGTH_SIZE {
+            received.extend_from_slice(&rx_bytes[MSG_LENGTH_SIZE..pubkey_len + MSG_LENGTH_SIZE]);
+            attestation.extend_from_slice(&rx_bytes[pubkey_len + MSG_LENGTH_SIZE..bytes_read]);
         } else {
             received.extend_from_slice(&rx_bytes[..bytes_read]);
         }
@@ -364,7 +365,10 @@ pub fn send_wasm(
 ///
 fn send_request(mut stream: &TcpStream, nonce: &[u8], pk: &PkP384) -> Result<usize> {
     let mut buffer: Vec<u8> = Vec::new();
-    buffer.push(nonce.len() as u8);
+    let nonce_length = nonce.len() as u16;
+    let length_bytes = nonce_length.to_le_bytes();
+    buffer.push(length_bytes[0]);
+    buffer.push(length_bytes[1]);
     buffer.extend(nonce);
     let bytes = pk.to_bytes();
     buffer.extend(bytes);

@@ -44,6 +44,11 @@ const OCALL_PRINT: u32 = 0x2;
 const ECALL_KEYGEN: u32 = 0x4;
 const ECALL_PROCESS: u32 = 0x3;
 
+// Size of the message length field in bytes
+const MSG_LENGTH_SIZE: usize = 2;
+
+
+
 // Empty listener
 struct Printer {}
 
@@ -229,7 +234,8 @@ pub fn handle_client(
         }
 
         // Use ecall to create AES128 key and ECC384 public key
-        let mut keydata: [u8; 16] = [0; 16];
+	const AES_KEY_SIZE: usize = 16;
+        let mut keydata: [u8; AES_KEY_SIZE] = [0; AES_KEY_SIZE];
         let mut pkdata: Vec<u8> = vec![];
 
         // Get sealed AES128 key and enclave app Elliptic Curve public key data
@@ -241,10 +247,10 @@ pub fn handle_client(
                 match data {
                     Some(buffer) => {
                         println!("Keygen response: {:02X?}", buffer);
-                        for i in 0..16 {
+                        for i in 0..AES_KEY_SIZE {
                             keydata[i] = buffer[i];
                         }
-                        pkdata.extend_from_slice(&buffer[16..buffer.len()]);
+                        pkdata.extend_from_slice(&buffer[AES_KEY_SIZE..buffer.len()]);
                     }
                     None => println!("No data from keygen"),
                 }
@@ -420,35 +426,35 @@ impl Listener for Printer {
 
 /// Prepare input data for keygen ecall
 ///
-/// The first byte specifies the length of the payload and the payload
+/// Two first bytes specify the length of the payload and the payload
 /// is the client public key as u8 bytes stored as Box<[u8]> heap
 /// allocated array.
 fn prepare_keygen_ecall_input(pk: &PkP384) -> Box<[u8]> {
     let bytes = pk.to_bytes();
-    let mut buf: [u8; 256] = [0; 256];
-    buf[0] = bytes.len() as u8;
-    for i in 0..bytes.len() {
-        buf[i + 1] = bytes[i];
-    }
-    let input: Box<[u8]> = buf[..bytes.len() + 1].to_vec().into_boxed_slice();
+    let payload_length = bytes.len() as u16;
+    let length_bytes = payload_length.to_le_bytes();
+    let mut buf: Vec<u8> = Vec::new();
+    buf.push(length_bytes[0]);
+    buf.push(length_bytes[1]);
+    buf.extend(bytes);
+    let input: Box<[u8]> = buf.into_boxed_slice();
     input
 }
 
 /// Prepare input data for process ecall
 ///
-/// The first byte specifies the length of the payload and the payload
-/// is data selaed client AES128 key (16 bytes) and encrypted message
-/// bytes.
+/// The first two bytes specify the length of the payload. The payload
+/// is sealed client AES128 key (16 bytes) and encrypted message bytes.
 fn prepare_process_ecall_input(keydata: &[u8; 16], msg: &[u8]) -> Box<[u8]> {
-    let mut buf: [u8; 256] = [0; 256];
-    buf[0] = (msg.len() + 16) as u8;
-    for i in 0..16 {
-        buf[i + 1] = keydata[i];
-    }
-    for i in 0..msg.len() {
-        buf[i + 16 + 1] = msg[i];
-    }
-    let input: Box<[u8]> = Box::new(buf);
+    const AES_KEY_SIZE: usize = 16;
+    let payload_length = (msg.len() + AES_KEY_SIZE) as u16;
+    let length_bytes = payload_length.to_le_bytes();
+    let mut buf: Vec<u8> = Vec::new();
+    buf.push(length_bytes[0]);
+    buf.push(length_bytes[1]);
+    buf.extend(keydata);
+    buf.extend(msg);
+    let input: Box<[u8]> = buf.into_boxed_slice();
     input
 }
 
@@ -456,7 +462,7 @@ fn prepare_process_ecall_input(keydata: &[u8; 16], msg: &[u8]) -> Box<[u8]> {
 ///
 /// Nonce value and the client public key will be received.
 fn receive_request(mut stream: &TcpStream) -> Result<(Vec<u8>, PkP384), happ::Error> {
-    const MAX_MESSAGE_SIZE: usize = 128;
+    const MAX_MESSAGE_SIZE: usize = 2048;
     let mut received: Vec<u8> = vec![];
     let mut nonce: Vec<u8> = vec![];
     let mut rx_bytes = [0u8; MAX_MESSAGE_SIZE];
@@ -467,11 +473,11 @@ fn receive_request(mut stream: &TcpStream) -> Result<(Vec<u8>, PkP384), happ::Er
             Err(_) => return Err(happ::Error::Unknown),
         };
         println!("{} bytes read", bytes_read);
-        let nonce_len = rx_bytes[0] as usize;
+	let nonce_len = (((rx_bytes[1] as u16) << 8) | (rx_bytes[0] as u16)) as usize;
         println!("Nonce length is {}", nonce_len);
-        nonce.extend_from_slice(&rx_bytes[1..nonce_len + 1]);
+        nonce.extend_from_slice(&rx_bytes[MSG_LENGTH_SIZE..nonce_len + MSG_LENGTH_SIZE]);
         // However many bytes we read, extend the `received` string bytes
-        received.extend_from_slice(&rx_bytes[nonce_len + 1..bytes_read]);
+        received.extend_from_slice(&rx_bytes[nonce_len + MSG_LENGTH_SIZE..bytes_read]);
 
         // If we didn't fill the array
         // stop reading because there's no more data (we hope!)
@@ -496,8 +502,10 @@ fn send_reply(mut stream: &TcpStream, pk: &PkP384, evidence: &Vec<u8>) -> Result
     }
     let mut buffer: Vec<u8> = Vec::new();
     let bytes = pk.to_bytes();
-    let len: u8 = bytes.len() as u8;
-    buffer.push(len);
+    let payload_length = bytes.len() as u16;
+    let length_bytes = payload_length.to_le_bytes();
+    buffer.push(length_bytes[0]);
+    buffer.push(length_bytes[1]);
     buffer.extend(bytes);
     buffer.extend(evidence);
     let bytes_written = match stream.write(&buffer) {

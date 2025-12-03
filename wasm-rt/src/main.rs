@@ -43,11 +43,17 @@ use spin::Mutex;
 use tinywasm::{Store, Module, Error, ParseError};
 
 // AES cipher block size
-const BLOCK_SIZE: usize = 16;
+const AES_BLOCK_SIZE: usize = 16;
 
 // Ecall identifiers
 const ECALL_KEYGEN: u32 = 0x4;
 const ECALL_PROCESS: u32 = 0x3;
+
+// Size of the message length field in bytes
+const MSG_LENGTH_SIZE: usize = 2;
+
+// AES key size in bytes
+const AES_KEY_SIZE: usize = 16;
 
 // Define global state protected by spin::Mutex and initially empty
 // This is a storage for deployed WASM bytecode programs.
@@ -146,7 +152,7 @@ fn ecall_keygen(ctx: &mut ecall::ECall, req: &[u8]) -> Status {
     let mut hasher = Sha256::new();
     hasher.update(&ss.as_ref().unwrap().to_bytes());
     let hash_result = hasher.finalize();
-    let mut keydata: Vec<u8> = hash_result[0..16].to_vec();
+    let mut keydata: Vec<u8> = hash_result[0..AES_KEY_SIZE].to_vec();
     let bytes = pk.to_bytes();
 
     // Seal the AES key to be used in later calls
@@ -157,15 +163,15 @@ fn ecall_keygen(ctx: &mut ecall::ECall, req: &[u8]) -> Status {
 
     // Prepare output message as sealed AES128 key and own public key
     let res = ctx.response();
-    let len = 16 + bytes.len();
+    let len = AES_KEY_SIZE + bytes.len();
     if len > res.len() {
         return Status::ShortBuffer;
     }
-    for i in 0 .. 16 {
+    for i in 0 .. AES_KEY_SIZE {
         res[i] = sealed_data_vec[i];
     }
-    if bytes.len() == len - 16 {
-        res[16..len].copy_from_slice(&bytes);
+    if bytes.len() == len - AES_KEY_SIZE {
+        res[AES_KEY_SIZE..len].copy_from_slice(&bytes);
     } else {
         return Status::Error;
     }
@@ -180,27 +186,27 @@ fn ecall_keygen(ctx: &mut ecall::ECall, req: &[u8]) -> Status {
 /// received string and return the number as a secure channel message.
 ///
 /// Input message format:
-/// byte[0]     = Length of the payload (max 256 bytes)
-/// byte[1..16] = Sealed AES key to decrypt input data
-/// byte[17..]  = Input data (encrypted text string)
+/// byte[0..1]  = Length of the payload (litle-endian)
+/// byte[2..17] = Sealed AES key to decrypt input data
+/// byte[18..]  = Input data (encrypted text string)
 ///
 fn ecall_process(ctx: &mut ecall::ECall, req: &[u8]) -> Status {
     ocall_buf(CallID::Print as u64, "PROCESS".as_bytes());
-
-    if req.is_empty() || req[0] as usize > req.len() - 17 {
+    if req.is_empty() || (req.len() < MSG_LENGTH_SIZE + AES_KEY_SIZE)  {
         return Status::Error;
     }
-    let payload_len = req[0] as usize;
-    let mut sealed_keydata: Vec<u8> = req[1..17].to_vec();
+    let payload_len = (((req[1] as u16) << 8) | (req[0] as u16)) as usize;
+    let msg_len = payload_len - AES_KEY_SIZE;
+    let mut sealed_keydata: Vec<u8> = req[MSG_LENGTH_SIZE..MSG_LENGTH_SIZE + AES_KEY_SIZE].to_vec();
     let keydata_vec = match unseal(&mut sealed_keydata) {
         Ok(v) => v,
         Err(_) => return Status::Error,
     };
     let cipher = aes_cipher_gen(&keydata_vec.as_slice());
-    if payload_len + 1 > req.len() - 17 {
+    if req.len() < MSG_LENGTH_SIZE + AES_KEY_SIZE + msg_len {
         return Status::Error;
     }
-    let mut received: Vec<u8> = req[17..payload_len + 1].to_vec();
+    let mut received: Vec<u8> = req[MSG_LENGTH_SIZE + AES_KEY_SIZE..MSG_LENGTH_SIZE + AES_KEY_SIZE + msg_len].to_vec();
     let mut ivec: Vec<u8> = match decrypt(&mut received, &cipher) {
         Ok(v) => v,
         Err(_) => return Status::Error,
@@ -210,7 +216,6 @@ fn ecall_process(ctx: &mut ecall::ECall, req: &[u8]) -> Status {
     if !is_global_state_initialized() {
 	init_global_state();
 	write_global_state(&mut ivec);
-	// Count number of words and encrypt the result
 	let count = 1 as usize;
 	let reply = count.to_string();
 	let mut data = reply.as_bytes().to_vec();
@@ -426,8 +431,8 @@ fn derive_aes128_seal_key() -> Result<[u8; 16], String> {
             return Err("Cannot get sealing key".to_string());
         },
     };
-    let mut aes128_key: [u8; 16] = [0; 16];
-    aes128_key.copy_from_slice(&seal_key_struct[..16]);
+    let mut aes128_key: [u8; AES_KEY_SIZE] = [0; AES_KEY_SIZE];
+    aes128_key.copy_from_slice(&seal_key_struct[..AES_KEY_SIZE]);
     Ok(aes128_key)
 }
 
@@ -451,10 +456,10 @@ fn unseal(msg: &mut Vec<u8>) -> Result<Vec<u8>, String> {
     return decrypt(msg, &cipher);
 }
 
-// The first byte specifies the length of the payload.
+// The first two bytes specify the length of the payload.
 fn parse_keygen_ecall_input(data: &[u8]) -> &[u8] {
-    let size = data[0] as usize;
-    let input = &data[1..size + 1];
+    let size = (((data[1] as u16) << 8) | (data[0] as u16)) as usize;
+    let input = &data[MSG_LENGTH_SIZE..size + MSG_LENGTH_SIZE];
     input
 }
 
@@ -480,7 +485,7 @@ fn pad(buffer: &mut Vec<u8>, block_size: usize) {
 // Remove padding from the message
 fn un_pad(buffer: &mut Vec<u8>) {
     if let Some(&pad_len) = buffer.last() {
-        if pad_len as usize <= BLOCK_SIZE && pad_len as usize <= buffer.len() {
+        if pad_len as usize <= AES_BLOCK_SIZE && pad_len as usize <= buffer.len() {
             let len = buffer.len();
             buffer.truncate(len - pad_len as usize);
         }
@@ -489,11 +494,11 @@ fn un_pad(buffer: &mut Vec<u8>) {
 
 // Encrypt the message using the provided AES128 key
 fn encrypt(msg: &mut Vec<u8>, cipher: &Aes128) ->  Result<Vec<u8>, String> {
-    pad(msg, BLOCK_SIZE);
+    pad(msg, AES_BLOCK_SIZE);
     let data: &[u8] = &msg;
     let mut blocks = Vec::new();
-    (0..data.len()).step_by(BLOCK_SIZE).for_each(|x| {
-        blocks.push(GenericArray::clone_from_slice(&data[x..x + BLOCK_SIZE]));
+    (0..data.len()).step_by(AES_BLOCK_SIZE).for_each(|x| {
+        blocks.push(GenericArray::clone_from_slice(&data[x..x + AES_BLOCK_SIZE]));
     });
     cipher.encrypt_blocks(&mut blocks);
     let buffer: Vec<u8> = blocks.into_iter().flatten().collect::<Vec<u8>>();
@@ -504,8 +509,8 @@ fn encrypt(msg: &mut Vec<u8>, cipher: &Aes128) ->  Result<Vec<u8>, String> {
 fn decrypt(msg: &mut Vec<u8>, cipher: &Aes128) ->  Result<Vec<u8>, String> {
     let data: &[u8] = &msg;
     let mut blocks = Vec::new();
-    (0..msg.len()).step_by(BLOCK_SIZE).for_each(|x| {
-        blocks.push(GenericArray::clone_from_slice(&data[x..x + BLOCK_SIZE]));
+    (0..msg.len()).step_by(AES_BLOCK_SIZE).for_each(|x| {
+        blocks.push(GenericArray::clone_from_slice(&data[x..x + AES_BLOCK_SIZE]));
     });
     cipher.decrypt_blocks(&mut blocks);
     let mut buffer: Vec<u8> = blocks.into_iter().flatten().collect::<Vec<u8>>();
